@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Servidor: 127.0.0.1
--- Tiempo de generación: 03-04-2025 a las 05:23:54
+-- Tiempo de generación: 07-04-2025 a las 21:07:30
 -- Versión del servidor: 10.4.32-MariaDB
 -- Versión de PHP: 8.2.12
 
@@ -25,6 +25,64 @@ DELIMITER $$
 --
 -- Procedimientos
 --
+CREATE DEFINER=`root`@`localhost` PROCEDURE `autenticar_usuario_con_ip` (IN `p_username` VARCHAR(50), IN `p_password` VARCHAR(255), IN `p_ip_address` VARCHAR(45), OUT `p_resultado` BOOLEAN, OUT `p_mensaje` VARCHAR(100))   BEGIN
+    DECLARE v_usuario_id INT;
+    DECLARE v_password_hash VARCHAR(255);
+    DECLARE v_activo BOOLEAN;
+    DECLARE v_bloqueado BOOLEAN;
+    
+    -- Verificar usuario
+    SELECT usuario_id, password_hash, activo, cuenta_bloqueada 
+    INTO v_usuario_id, v_password_hash, v_activo, v_bloqueado
+    FROM usuarios 
+    WHERE username = p_username;
+    
+    IF v_usuario_id IS NULL THEN
+        SET p_resultado = FALSE;
+        SET p_mensaje = 'Usuario no encontrado';
+    ELSEIF v_activo = FALSE THEN
+        SET p_resultado = FALSE;
+        SET p_mensaje = 'Cuenta desactivada';
+    ELSEIF v_bloqueado = TRUE THEN
+        SET p_resultado = FALSE;
+        SET p_mensaje = 'Cuenta bloqueada temporalmente';
+    ELSEIF v_password_hash = SHA2(CONCAT(p_password, 'salt_secreta'), 256) THEN
+        -- Autenticación exitosa
+        UPDATE usuarios 
+        SET intentos_fallidos = 0,
+            ultimo_login = CURRENT_TIMESTAMP
+        WHERE usuario_id = v_usuario_id;
+        
+        -- Registrar en auditoría
+        INSERT INTO auditoria (usuario_id, tabla_afectada, accion, registro_id, ip_address)
+        VALUES (v_usuario_id, 'usuarios', 'LOGIN', v_usuario_id, p_ip_address);
+        
+        SET p_resultado = TRUE;
+        SET p_mensaje = 'Autenticación exitosa';
+    ELSE
+        -- Autenticación fallida
+        CALL registrar_intento_fallido(v_usuario_id);
+        
+        -- Registrar en auditoría
+        INSERT INTO auditoria (usuario_id, tabla_afectada, accion, registro_id, ip_address)
+        VALUES (v_usuario_id, 'usuarios', 'LOGIN_FAIL', v_usuario_id, p_ip_address);
+        
+        -- Obtener estado actualizado
+        SELECT intentos_fallidos, cuenta_bloqueada 
+        INTO @intentos, @bloqueado
+        FROM usuarios 
+        WHERE usuario_id = v_usuario_id;
+        
+        IF @bloqueado THEN
+            SET p_mensaje = 'Cuenta bloqueada por múltiples intentos fallidos';
+        ELSE
+            SET p_mensaje = CONCAT('Contraseña incorrecta. Intentos restantes: ', 4 - @intentos);
+        END IF;
+        
+        SET p_resultado = FALSE;
+    END IF;
+END$$
+
 CREATE DEFINER=`root`@`localhost` PROCEDURE `desbloquear_usuario` (IN `p_usuario_id` INT, IN `p_admin_id` INT)   BEGIN
     DECLARE v_rol_admin INT;
     
@@ -49,6 +107,24 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `desbloquear_usuario` (IN `p_usuario
     ELSE
         SELECT 0 AS success, 'No tienes permisos para desbloquear cuentas' AS message;
     END IF;
+END$$
+
+CREATE DEFINER=`root`@`localhost` PROCEDURE `realizar_venta_con_ip` (IN `p_usuario_id` INT, IN `p_cliente_id` INT, IN `p_metodo_pago` ENUM('efectivo','tarjeta','transferencia'), IN `p_ip_cliente` VARCHAR(45))   BEGIN
+    DECLARE v_venta_id INT;
+    
+    -- Insertar la venta con la IP del cliente
+    INSERT INTO ventas (usuario_id, cliente_id, metodo_pago, direccion_ip)
+    VALUES (p_usuario_id, p_cliente_id, p_metodo_pago, p_ip_cliente);
+    
+    SET v_venta_id = LAST_INSERT_ID();
+    
+    -- Aquí iría la lógica para agregar los detalles del pedido
+    
+    -- Registrar en auditoría
+    INSERT INTO auditoria (usuario_id, tabla_afectada, accion, registro_id, ip_address)
+    VALUES (p_usuario_id, 'ventas', 'INSERT', v_venta_id, p_ip_cliente);
+    
+    SELECT v_venta_id AS venta_id;
 END$$
 
 CREATE DEFINER=`root`@`localhost` PROCEDURE `registrar_intento_fallido` (IN `p_usuario_id` INT)   BEGIN
@@ -136,7 +212,7 @@ CREATE TABLE `auditoria` (
   `datos_anteriores` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`datos_anteriores`)),
   `datos_nuevos` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`datos_nuevos`)),
   `fecha_accion` timestamp NOT NULL DEFAULT current_timestamp(),
-  `ip_address` varchar(45) DEFAULT NULL
+  `ip_address` varchar(45) NOT NULL COMMENT 'Dirección IP del usuario que realizó la acción'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
@@ -144,7 +220,8 @@ CREATE TABLE `auditoria` (
 --
 
 INSERT INTO `auditoria` (`auditoria_id`, `usuario_id`, `tabla_afectada`, `accion`, `registro_id`, `datos_anteriores`, `datos_nuevos`, `fecha_accion`, `ip_address`) VALUES
-(1, NULL, 'usuarios', 'UPDATE', 1, '{\"nombre\": \"Administrador\", \"apellido\": \"Principal\", \"email\": \"admin@legumbreria.com\", \"telefono\": \"0999999999\", \"direccion\": \"Dirección principal\", \"activo\": 1}', '{\"nombre\": \"Administrador\", \"apellido\": \"Principal\", \"email\": \"yamejiaa@icloud.com\", \"telefono\": \"0999999999\", \"direccion\": \"Dirección principal\", \"activo\": 1}', '2025-04-03 03:11:33', NULL);
+(1, NULL, 'usuarios', 'UPDATE', 1, '{\"nombre\": \"Administrador\", \"apellido\": \"Principal\", \"email\": \"admin@legumbreria.com\", \"telefono\": \"0999999999\", \"direccion\": \"Dirección principal\", \"activo\": 1}', '{\"nombre\": \"Administrador\", \"apellido\": \"Principal\", \"email\": \"yamejiaa@icloud.com\", \"telefono\": \"0999999999\", \"direccion\": \"Dirección principal\", \"activo\": 1}', '2025-04-03 03:11:33', ''),
+(2, 2, 'ventas', 'INSERT', 1, NULL, NULL, '2025-04-07 18:57:52', '186.42.123.55');
 
 -- --------------------------------------------------------
 
@@ -223,13 +300,6 @@ CREATE TABLE `historial_passwords` (
   `password_hash` varchar(255) NOT NULL,
   `creado_en` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Volcado de datos para la tabla `historial_passwords`
---
-
-INSERT INTO `historial_passwords` (`historial_id`, `usuario_id`, `password_hash`, `creado_en`) VALUES
-(1, 1, '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', '2025-04-03 03:11:33');
 
 -- --------------------------------------------------------
 
@@ -321,46 +391,172 @@ CREATE TABLE `productos` (
 -- Disparadores `productos`
 --
 DELIMITER $$
+CREATE TRIGGER `after_producto_delete` AFTER DELETE ON `productos` FOR EACH ROW BEGIN
+    DECLARE v_current_user_id INT;
+    DECLARE v_current_ip VARCHAR(45);
+    
+    -- Obtener el usuario e IP actual de las variables de sesión
+    SET v_current_user_id = IFNULL(@current_user_id, NULL);
+    SET v_current_ip = IFNULL(@current_ip, NULL);
+    
+    -- Insertar registro de auditoría para producto eliminado
+    INSERT INTO auditoria (
+        usuario_id, 
+        tabla_afectada, 
+        accion, 
+        registro_id, 
+        datos_anteriores, 
+        datos_nuevos, 
+        ip_address
+    ) VALUES (
+        v_current_user_id, 
+        'productos', 
+        'DELETE', 
+        OLD.producto_id,
+        JSON_OBJECT(
+            'nombre', OLD.nombre,
+            'descripcion', OLD.descripcion,
+            'precio_compra', OLD.precio_compra,
+            'precio_venta', OLD.precio_venta,
+            'stock_final', OLD.stock,
+            'activo', OLD.activo
+        ),
+        NULL,
+        v_current_ip
+    );
+END
+$$
+DELIMITER ;
+DELIMITER $$
+CREATE TRIGGER `after_producto_insert` AFTER INSERT ON `productos` FOR EACH ROW BEGIN
+    DECLARE v_current_user_id INT;
+    DECLARE v_current_ip VARCHAR(45);
+    
+    -- Obtener el usuario e IP actual de las variables de sesión
+    SET v_current_user_id = IFNULL(@current_user_id, NULL);
+    SET v_current_ip = IFNULL(@current_ip, NULL);
+    
+    -- Insertar registro de auditoría para nuevo producto
+    INSERT INTO auditoria (
+        usuario_id, 
+        tabla_afectada, 
+        accion, 
+        registro_id, 
+        datos_anteriores, 
+        datos_nuevos, 
+        ip_address
+    ) VALUES (
+        v_current_user_id, 
+        'productos', 
+        'INSERT', 
+        NEW.producto_id,
+        NULL,
+        JSON_OBJECT(
+            'nombre', NEW.nombre,
+            'descripcion', NEW.descripcion,
+            'precio_compra', NEW.precio_compra,
+            'precio_venta', NEW.precio_venta,
+            'stock_inicial', NEW.stock,
+            'activo', NEW.activo
+        ),
+        v_current_ip
+    );
+END
+$$
+DELIMITER ;
+DELIMITER $$
 CREATE TRIGGER `after_producto_update` AFTER UPDATE ON `productos` FOR EACH ROW BEGIN
+    DECLARE v_current_user_id INT;
+    DECLARE v_current_ip VARCHAR(45);
+    
+    -- Obtener el usuario e IP actual de las variables de sesión
+    SET v_current_user_id = IFNULL(@current_user_id, NULL);
+    SET v_current_ip = IFNULL(@current_ip, NULL);
+    
+    -- Registrar cambios de precio en el historial específico
     IF NEW.precio_venta <> OLD.precio_venta THEN
-        -- Registrar cambio de precio en historial
-        INSERT INTO historial_precios (producto_id, precio_anterior, precio_nuevo, usuario_id, motivo)
-        VALUES (
+        INSERT INTO historial_precios (
+            producto_id, 
+            precio_anterior, 
+            precio_nuevo, 
+            usuario_id, 
+            motivo
+        ) VALUES (
             NEW.producto_id, 
             OLD.precio_venta, 
             NEW.precio_venta, 
-            IFNULL(@current_user_id, 1), 
+            v_current_user_id, 
             'Actualización de precio'
         );
     END IF;
     
-    -- Registrar otros cambios en auditoría
+    -- Registrar CAMBIOS DE STOCK específicamente (requerimiento principal)
+    IF NEW.stock <> OLD.stock THEN
+        INSERT INTO auditoria (
+            usuario_id, 
+            tabla_afectada, 
+            accion, 
+            registro_id, 
+            datos_anteriores, 
+            datos_nuevos, 
+            ip_address
+        ) VALUES (
+            v_current_user_id, 
+            'productos', 
+            'UPDATE_STOCK', 
+            NEW.producto_id,
+            JSON_OBJECT(
+                'stock_anterior', OLD.stock,
+                'producto', OLD.nombre,
+                'precio_venta', OLD.precio_venta
+            ),
+            JSON_OBJECT(
+                'stock_nuevo', NEW.stock,
+                'diferencia', (OLD.stock - NEW.stock),
+                'producto', NEW.nombre,
+                'precio_venta', NEW.precio_venta
+            ),
+            v_current_ip
+        );
+    END IF;
+    
+    -- Registrar otros cambios generales (nombre, descripción, etc.)
     IF NEW.nombre <> OLD.nombre OR NEW.descripcion <> OLD.descripcion OR 
-       NEW.precio_compra <> OLD.precio_compra OR NEW.stock <> OLD.stock OR 
-       NEW.activo <> OLD.activo THEN
+       NEW.precio_compra <> OLD.precio_compra OR NEW.activo <> OLD.activo THEN
         
-        INSERT INTO auditoria (usuario_id, tabla_afectada, accion, registro_id, datos_anteriores, datos_nuevos)
-        VALUES (
-            IFNULL(@current_user_id, NULL), 
+        -- Preparar datos anteriores
+        SET @datos_antes = JSON_OBJECT(
+            'nombre', OLD.nombre,
+            'descripcion', OLD.descripcion,
+            'precio_compra', OLD.precio_compra,
+            'activo', OLD.activo
+        );
+        
+        -- Preparar datos nuevos
+        SET @datos_nuevos = JSON_OBJECT(
+            'nombre', NEW.nombre,
+            'descripcion', NEW.descripcion,
+            'precio_compra', NEW.precio_compra,
+            'activo', NEW.activo
+        );
+        
+        -- Insertar en auditoría
+        INSERT INTO auditoria (
+            usuario_id, 
+            tabla_afectada, 
+            accion, 
+            registro_id, 
+            datos_anteriores, 
+            datos_nuevos, 
+            ip_address
+        ) VALUES (
+            v_current_user_id, 
             'productos', 
             'UPDATE', 
             NEW.producto_id,
-            JSON_OBJECT(
-                'nombre', OLD.nombre,
-                'descripcion', OLD.descripcion,
-                'precio_compra', OLD.precio_compra,
-                'precio_venta', OLD.precio_venta,
-                'stock', OLD.stock,
-                'activo', OLD.activo
-            ),
-            JSON_OBJECT(
-                'nombre', NEW.nombre,
-                'descripcion', NEW.descripcion,
-                'precio_compra', NEW.precio_compra,
-                'precio_venta', NEW.precio_venta,
-                'stock', NEW.stock,
-                'activo', NEW.activo
-            )
+            @datos_antes,
+            @datos_nuevos,
+            v_current_ip
         );
     END IF;
 END
@@ -513,8 +709,8 @@ CREATE TABLE `usuarios` (
 --
 
 INSERT INTO `usuarios` (`usuario_id`, `rol_id`, `username`, `email`, `password_hash`, `nombre`, `apellido`, `telefono`, `direccion`, `intentos_fallidos`, `cuenta_bloqueada`, `fecha_bloqueo`, `fecha_desbloqueo`, `activo`, `creado_en`, `actualizado_en`) VALUES
-(1, 1, 'admin', 'yamejiaa@icloud.com', '$2y$10$ZKGXW.zWY5bJZ7W9v6n8.e5UOj7hN.8qk3VcKzLm1RtD2TQxvL1aK', 'Administrador', 'Principal', '0999999999', 'Dirección principal', 0, 0, NULL, NULL, 1, '2025-04-03 02:47:01', '2025-04-03 03:11:33'),
-(2, 3, 'myshelm11', 'myshelandreamoreno4@gmail.com', '$2y$10$vK3I6m3nySKGPOgQDLJ0wOza5rebcJGh/VKQKbdeE4/sb6wHF56cC', 'Myshel', 'Moreno', '3207654512', 'Cascorba cabi', 0, 0, NULL, NULL, 1, '2025-04-03 03:07:00', '2025-04-03 03:07:00');
+(2, 3, 'myshelm11', 'myshelandreamoreno4@gmail.com', '$2y$10$vK3I6m3nySKGPOgQDLJ0wOza5rebcJGh/VKQKbdeE4/sb6wHF56cC', 'Myshel', 'Moreno', '3207654512', 'Cascorba cabi', 0, 0, NULL, NULL, 1, '2025-04-03 03:07:00', '2025-04-03 03:07:00'),
+(3, 1, 'admin', 'yamejiaa@icloud.com', '$2y$10$ZKGXW.zWY5bJZ7W9v6n8.e5UOj7hN.8qk3VcKzLm1RtD2TQxvL1aK', 'Yeison', 'Mejía', '0000000000', 'Dirección principal', 0, 0, NULL, NULL, 1, '2025-04-03 03:41:47', '2025-04-03 03:41:47');
 
 --
 -- Disparadores `usuarios`
@@ -587,8 +783,36 @@ CREATE TABLE `ventas` (
   `total` decimal(10,3) NOT NULL,
   `metodo_pago` enum('efectivo','tarjeta','transferencia') NOT NULL,
   `estado` enum('pendiente','completada','cancelada') DEFAULT 'completada',
-  `observaciones` text DEFAULT NULL
+  `observaciones` text DEFAULT NULL,
+  `direccion_ip` varchar(45) DEFAULT NULL COMMENT 'Dirección IP del cliente que realizó el pedido'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Volcado de datos para la tabla `ventas`
+--
+
+INSERT INTO `ventas` (`venta_id`, `usuario_id`, `cliente_id`, `fecha_venta`, `subtotal`, `iva`, `total`, `metodo_pago`, `estado`, `observaciones`, `direccion_ip`) VALUES
+(1, 2, NULL, '2025-04-07 18:57:52', 0.000, 0.000, 0.000, 'efectivo', 'completada', NULL, '186.42.123.55');
+
+-- --------------------------------------------------------
+
+--
+-- Estructura Stand-in para la vista `vista_auditoria_resumen`
+-- (Véase abajo para la vista actual)
+--
+CREATE TABLE `vista_auditoria_resumen` (
+`auditoria_id` int(11)
+,`tabla_afectada` varchar(50)
+,`accion` varchar(20)
+,`registro_id` int(11)
+,`datos_anteriores` longtext
+,`datos_nuevos` longtext
+,`fecha_accion` timestamp
+,`nombre_usuario` varchar(201)
+,`email` varchar(100)
+,`ip_address` varchar(45)
+,`ip_enmascarada` varchar(51)
+);
 
 -- --------------------------------------------------------
 
@@ -629,6 +853,15 @@ CREATE TABLE `vista_ventas_diarias` (
 ,`ingresos_totales` decimal(32,3)
 ,`promedio_venta` decimal(14,7)
 );
+
+-- --------------------------------------------------------
+
+--
+-- Estructura para la vista `vista_auditoria_resumen`
+--
+DROP TABLE IF EXISTS `vista_auditoria_resumen`;
+
+CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `vista_auditoria_resumen`  AS SELECT `a`.`auditoria_id` AS `auditoria_id`, `a`.`tabla_afectada` AS `tabla_afectada`, `a`.`accion` AS `accion`, `a`.`registro_id` AS `registro_id`, `a`.`datos_anteriores` AS `datos_anteriores`, `a`.`datos_nuevos` AS `datos_nuevos`, `a`.`fecha_accion` AS `fecha_accion`, concat(`u`.`nombre`,' ',`u`.`apellido`) AS `nombre_usuario`, `u`.`email` AS `email`, `a`.`ip_address` AS `ip_address`, CASE WHEN `a`.`ip_address` is not null THEN concat(substring_index(`a`.`ip_address`,'.',1),'.*.*.*') ELSE 'IP no registrada' END AS `ip_enmascarada` FROM (`auditoria` `a` left join `usuarios` `u` on(`a`.`usuario_id` = `u`.`usuario_id`)) ORDER BY `a`.`fecha_accion` DESC ;
 
 -- --------------------------------------------------------
 
@@ -790,7 +1023,7 @@ ALTER TABLE `ventas`
 -- AUTO_INCREMENT de la tabla `auditoria`
 --
 ALTER TABLE `auditoria`
-  MODIFY `auditoria_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+  MODIFY `auditoria_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
 
 --
 -- AUTO_INCREMENT de la tabla `categorias`
@@ -838,7 +1071,7 @@ ALTER TABLE `permisos`
 -- AUTO_INCREMENT de la tabla `productos`
 --
 ALTER TABLE `productos`
-  MODIFY `producto_id` int(11) NOT NULL AUTO_INCREMENT;
+  MODIFY `producto_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
 
 --
 -- AUTO_INCREMENT de la tabla `promociones`
@@ -856,25 +1089,25 @@ ALTER TABLE `proveedores`
 -- AUTO_INCREMENT de la tabla `roles`
 --
 ALTER TABLE `roles`
-  MODIFY `rol_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=7;
+  MODIFY `rol_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
 
 --
 -- AUTO_INCREMENT de la tabla `roles_permisos`
 --
 ALTER TABLE `roles_permisos`
-  MODIFY `rol_permiso_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=54;
+  MODIFY `rol_permiso_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=52;
 
 --
 -- AUTO_INCREMENT de la tabla `usuarios`
 --
 ALTER TABLE `usuarios`
-  MODIFY `usuario_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
+  MODIFY `usuario_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
 
 --
 -- AUTO_INCREMENT de la tabla `ventas`
 --
 ALTER TABLE `ventas`
-  MODIFY `venta_id` int(11) NOT NULL AUTO_INCREMENT;
+  MODIFY `venta_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
 
 --
 -- Restricciones para tablas volcadas
